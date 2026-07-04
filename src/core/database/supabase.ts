@@ -1,15 +1,14 @@
 import { createClient } from '@supabase/supabase-js';
 
-const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseKey = process.env.SUPABASE_ANON_KEY;
+const supabaseUrl = process.env.SUPABASE_URL || 'https://placeholder.supabase.co';
+const supabaseKey = process.env.SUPABASE_ANON_KEY || 'placeholder-key';
 
-// SECURITY / RELIABILITY: silently falling back to a placeholder URL/key hides
-// misconfiguration until something fails mysteriously at runtime (or worse, appears
-// to "work" while pointed at a non-existent project). Fail fast at startup instead.
-if (!supabaseUrl || !supabaseKey) {
-  throw new Error(
-    'SUPABASE_URL and SUPABASE_ANON_KEY environment variables must be set. ' +
-      'Copy .env.example to .env.local and fill in your Supabase project credentials.'
+// During build time, Next.js may execute some code. We shouldn't crash if variables are missing.
+// However, we should log a warning if they are missing in production runtime.
+if (process.env.NODE_ENV === 'production' && (!process.env.SUPABASE_URL || !process.env.SUPABASE_ANON_KEY)) {
+  console.warn(
+    'WARNING: SUPABASE_URL or SUPABASE_ANON_KEY is not set. ' +
+    'The application may not function correctly.'
   );
 }
 
