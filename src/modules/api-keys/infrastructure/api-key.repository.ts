@@ -1,8 +1,8 @@
-import fs from 'fs';
-import path from 'path';
 import crypto from 'crypto';
 import { encryptKey, decryptKey } from '@core/security/crypto';
 import { ApplicationError } from '@shared/errors';
+import { supabase } from '@core/database/supabase';
+import { IApiKeyRepository } from '@core/ports/interfaces';
 
 export interface ApiKeyRecord {
   id: string;
@@ -16,95 +16,137 @@ export interface ApiKeyRecord {
   createdAt: string;
 }
 
-import { IApiKeyRepository } from '@core/ports/interfaces';
-
 class ApiKeyRepository implements IApiKeyRepository {
-  private localFile: string;
-
-  constructor() {
-    // Persistent local file storage mock fallback for standalone serverless runtimes
-    const dataDir = path.join(process.cwd(), 'src/shared/data');
-    if (!fs.existsSync(dataDir)) {
-      fs.mkdirSync(dataDir, { recursive: true });
-    }
-    this.localFile = path.join(dataDir, 'keys.json');
-  }
-
-  private readAll(): ApiKeyRecord[] {
-    if (!fs.existsSync(this.localFile)) return [];
-    try {
-      return JSON.parse(fs.readFileSync(this.localFile, 'utf8'));
-    } catch {
-      return [];
-    }
-  }
-
-  private writeAll(records: ApiKeyRecord[]): void {
-    fs.writeFileSync(this.localFile, JSON.stringify(records, null, 2), 'utf8');
-  }
-
   /**
-   * Adds a new API key securely encrypted.
+   * Adds a new API key securely encrypted to Supabase.
    */
   public async addKey(providerId: string, name: string, plainValue: string): Promise<ApiKeyRecord> {
     const encrypted = encryptKey(plainValue);
-    const records = this.readAll();
-
-    const newRecord: ApiKeyRecord = {
+    
+    const newRecord = {
       id: crypto.randomUUID(),
-      providerId,
+      provider_id: providerId,
       name,
-      encryptedValue: encrypted.encryptedValue,
+      encrypted_value: encrypted.encryptedValue,
       iv: encrypted.iv,
       tag: encrypted.tag,
       status: 'enabled',
-      createdAt: new Date().toISOString(),
+      created_at: new Date().toISOString(),
     };
 
-    records.push(newRecord);
-    this.writeAll(records);
-    return newRecord;
+    const { data, error } = await supabase
+      .from('api_keys_vault')
+      .insert(newRecord)
+      .select()
+      .single();
+
+    if (error) {
+      console.error('Supabase error adding key:', error);
+      throw new ApplicationError('DATABASE_ERROR', `Failed to save API key: ${error.message}`);
+    }
+
+    return this.mapToRecord(data);
   }
 
   /**
-   * Retrieves and decrypts the key for a provider.
+   * Retrieves and decrypts the key for a provider from Supabase.
    */
   public async getDecryptedKey(providerId: string): Promise<string | null> {
-    const record = this.readAll().find((r) => r.providerId === providerId && r.status === 'enabled');
-    if (!record) return null;
+    const { data, error } = await supabase
+      .from('api_keys_vault')
+      .select('*')
+      .eq('provider_id', providerId)
+      .eq('status', 'enabled')
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .single();
+
+    if (error) {
+      if (error.code === 'PGRST116') return null; // Not found
+      throw new ApplicationError('DATABASE_ERROR', `Failed to fetch API key: ${error.message}`);
+    }
     
     try {
-      return decryptKey(record.encryptedValue, record.iv, record.tag);
+      return decryptKey(data.encrypted_value, data.iv, data.tag);
     } catch (e) {
+      console.error('Decryption error:', e);
       throw new ApplicationError('DECRYPTION_ERROR', 'Failed to decrypt API key credentials.');
     }
   }
 
   /**
-   * Lists all stored keys with secrets removed.
+   * Lists all stored keys from Supabase with secrets removed.
    */
   public async listKeys(): Promise<Array<Omit<ApiKeyRecord, 'encryptedValue' | 'iv' | 'tag'>>> {
-    return this.readAll().map(({ encryptedValue, iv, tag, ...rest }) => rest);
+    const { data, error } = await supabase
+      .from('api_keys_vault')
+      .select('id, provider_id, name, status, last_tested_at, created_at')
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      throw new ApplicationError('DATABASE_ERROR', `Failed to list API keys: ${error.message}`);
+    }
+
+    return (data || []).map(item => ({
+      id: item.id,
+      providerId: item.provider_id,
+      name: item.name,
+      status: item.status as 'enabled' | 'disabled',
+      lastTestedAt: item.last_tested_at,
+      createdAt: item.created_at,
+    }));
   }
 
   /**
-   * Deletes a key record by ID.
+   * Deletes a key record by ID from Supabase.
    */
   public async deleteKey(id: string): Promise<void> {
-    const records = this.readAll().filter((r) => r.id !== id);
-    this.writeAll(records);
+    const { error } = await supabase
+      .from('api_keys_vault')
+      .delete()
+      .eq('id', id);
+
+    if (error) {
+      throw new ApplicationError('DATABASE_ERROR', `Failed to delete API key: ${error.message}`);
+    }
   }
 
   /**
-   * Toggles status (enabled/disabled).
+   * Toggles status (enabled/disabled) in Supabase.
    */
   public async toggleKeyStatus(id: string): Promise<void> {
-    const records = this.readAll();
-    const index = records.findIndex((r) => r.id === id);
-    if (index !== -1) {
-      records[index].status = records[index].status === 'enabled' ? 'disabled' : 'enabled';
-      this.writeAll(records);
+    const { data: current } = await supabase
+      .from('api_keys_vault')
+      .select('status')
+      .eq('id', id)
+      .single();
+
+    if (!current) return;
+
+    const newStatus = current.status === 'enabled' ? 'disabled' : 'enabled';
+
+    const { error } = await supabase
+      .from('api_keys_vault')
+      .update({ status: newStatus })
+      .eq('id', id);
+
+    if (error) {
+      throw new ApplicationError('DATABASE_ERROR', `Failed to update API key status: ${error.message}`);
     }
+  }
+
+  private mapToRecord(data: any): ApiKeyRecord {
+    return {
+      id: data.id,
+      providerId: data.provider_id,
+      name: data.name,
+      encryptedValue: data.encrypted_value,
+      iv: data.iv,
+      tag: data.tag,
+      status: data.status,
+      lastTestedAt: data.last_tested_at,
+      createdAt: data.created_at,
+    };
   }
 }
 

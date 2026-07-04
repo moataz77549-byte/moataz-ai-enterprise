@@ -1,6 +1,7 @@
-import fs from 'fs';
-import path from 'path';
 import { getModelMetadata } from '../../providers/domain/model.registry';
+import { supabase } from '@core/database/supabase';
+import { IUsageRepository } from '@core/ports/interfaces';
+import { ApplicationError } from '@shared/errors';
 
 export interface UsageMetric {
   id: string;
@@ -17,36 +18,11 @@ export interface UsageMetric {
   createdAt: string;
 }
 
-import { IUsageRepository } from '@core/ports/interfaces';
-
 class UsageRepository implements IUsageRepository {
-  private localFile: string;
-
-  constructor() {
-    const dataDir = path.join(process.cwd(), 'src/shared/data');
-    if (!fs.existsSync(dataDir)) {
-      fs.mkdirSync(dataDir, { recursive: true });
-    }
-    this.localFile = path.join(dataDir, 'usage.json');
-  }
-
-  private readAll(): UsageMetric[] {
-    if (!fs.existsSync(this.localFile)) return [];
-    try {
-      return JSON.parse(fs.readFileSync(this.localFile, 'utf8'));
-    } catch {
-      return [];
-    }
-  }
-
-  private writeAll(records: UsageMetric[]): void {
-    fs.writeFileSync(this.localFile, JSON.stringify(records, null, 2), 'utf8');
-  }
-
   /**
-   * Logs a gateway interaction and computes pricing costs.
+   * Logs a gateway interaction and computes pricing costs to Supabase.
    */
-  public logUsage(params: {
+  public async logUsage(params: {
     requestId: string;
     providerId: string;
     modelId: string;
@@ -55,8 +31,7 @@ class UsageRepository implements IUsageRepository {
     latencyMs: number;
     statusCode: number;
     errorCode?: string;
-  }): UsageMetric {
-    const records = this.readAll();
+  }): Promise<UsageMetric> {
     const metadata = getModelMetadata(params.modelId);
     
     let estimatedCost = 0;
@@ -66,44 +41,60 @@ class UsageRepository implements IUsageRepository {
         (params.completionTokens * metadata.outputPricePerMillion) / 1000000;
     }
 
-    const newRecord: UsageMetric = {
+    const newRecord = {
       id: crypto.randomUUID(),
-      requestId: params.requestId,
-      providerId: params.providerId,
-      modelId: params.modelId,
-      promptTokens: params.promptTokens,
-      completionTokens: params.completionTokens,
-      totalTokens: params.promptTokens + params.completionTokens,
-      estimatedCost,
-      latencyMs: params.latencyMs,
-      statusCode: params.statusCode,
-      errorCode: params.errorCode,
-      createdAt: new Date().toISOString(),
+      request_id: params.requestId,
+      provider_id: params.providerId,
+      model_id: params.modelId,
+      prompt_tokens: params.promptTokens,
+      completion_tokens: params.completionTokens,
+      total_tokens: params.promptTokens + params.completionTokens,
+      estimated_cost: estimatedCost,
+      latency_ms: params.latencyMs,
+      status_code: params.statusCode,
+      error_code: params.errorCode,
+      created_at: new Date().toISOString(),
     };
 
-    records.push(newRecord);
-    this.writeAll(records);
-    return newRecord;
+    const { data, error } = await supabase
+      .from('api_call_logs')
+      .insert(newRecord)
+      .select()
+      .single();
+
+    if (error) {
+      console.error('Supabase error logging usage:', error);
+      throw new ApplicationError('DATABASE_ERROR', `Failed to log usage: ${error.message}`);
+    }
+
+    return this.mapToMetric(data);
   }
 
   /**
-   * Retrieves aggregated statistics.
+   * Retrieves aggregated statistics from Supabase.
    */
-  public getStats(): {
+  public async getStats(): Promise<{
     totalRequests: number;
     totalTokens: number;
     totalCost: number;
     averageLatency: number;
-  } {
-    const records = this.readAll();
-    if (records.length === 0) {
+  }> {
+    const { data, error } = await supabase
+      .from('api_call_logs')
+      .select('total_tokens, estimated_cost, latency_ms');
+
+    if (error) {
+      throw new ApplicationError('DATABASE_ERROR', `Failed to fetch stats: ${error.message}`);
+    }
+
+    if (!data || data.length === 0) {
       return { totalRequests: 0, totalTokens: 0, totalCost: 0, averageLatency: 0 };
     }
 
-    const totalRequests = records.length;
-    const totalTokens = records.reduce((sum, r) => sum + r.totalTokens, 0);
-    const totalCost = records.reduce((sum, r) => sum + r.estimatedCost, 0);
-    const totalLatency = records.reduce((sum, r) => sum + r.latencyMs, 0);
+    const totalRequests = data.length;
+    const totalTokens = data.reduce((sum, r) => sum + (r.total_tokens || 0), 0);
+    const totalCost = data.reduce((sum, r) => sum + (r.estimated_cost || 0), 0);
+    const totalLatency = data.reduce((sum, r) => sum + (r.latency_ms || 0), 0);
 
     return {
       totalRequests,
@@ -114,10 +105,37 @@ class UsageRepository implements IUsageRepository {
   }
 
   /**
-   * Returns list of usage records.
+   * Returns list of usage records from Supabase.
    */
-  public getHistory(): UsageMetric[] {
-    return this.readAll().sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  public async getHistory(): Promise<UsageMetric[]> {
+    const { data, error } = await supabase
+      .from('api_call_logs')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .limit(100);
+
+    if (error) {
+      throw new ApplicationError('DATABASE_ERROR', `Failed to fetch history: ${error.message}`);
+    }
+
+    return (data || []).map(item => this.mapToMetric(item));
+  }
+
+  private mapToMetric(data: any): UsageMetric {
+    return {
+      id: data.id,
+      requestId: data.request_id,
+      providerId: data.provider_id,
+      modelId: data.model_id,
+      promptTokens: data.prompt_tokens,
+      completionTokens: data.completion_tokens,
+      totalTokens: data.total_tokens,
+      estimatedCost: data.estimated_cost,
+      latencyMs: data.latency_ms,
+      statusCode: data.status_code,
+      errorCode: data.error_code,
+      createdAt: data.created_at,
+    };
   }
 }
 

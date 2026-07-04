@@ -1,43 +1,13 @@
-import fs from 'fs';
-import path from 'path';
 import crypto from 'crypto';
 import { encryptKey, decryptKey } from '@core/security/crypto';
 import { ApplicationError } from '@shared/errors';
+import { supabase } from '@core/database/supabase';
 import {
   ICustomProviderRepository,
   CustomProviderInput,
   CustomProviderRecord,
   CustomProviderType,
 } from '@shared/ports/repositories';
-
-interface StoredProvider {
-  id: string;
-  slug: string;
-  name: string;
-  providerType: CustomProviderType;
-  baseUrl: string;
-  defaultModel?: string;
-  headers: Record<string, string>;
-  capabilities: {
-    supportsStreaming: boolean;
-    supportsVision: boolean;
-    supportsTools: boolean;
-    supportsReasoning: boolean;
-  };
-  authHeader: string;
-  authPrefix: string;
-  timeoutMs: number;
-  maxRetries: number;
-  encryptedApiKey?: string;
-  apiKeyIv?: string;
-  apiKeyTag?: string;
-  status: 'enabled' | 'disabled';
-  connectionStatus: 'unknown' | 'healthy' | 'degraded' | 'down';
-  lastTestedAt?: string;
-  lastLatencyMs?: number;
-  createdAt: string;
-  updatedAt: string;
-}
 
 function slugify(name: string): string {
   return (
@@ -49,66 +19,58 @@ function slugify(name: string): string {
   );
 }
 
-function toRecord(p: StoredProvider): CustomProviderRecord {
-  const { encryptedApiKey, apiKeyIv, apiKeyTag, ...rest } = p;
-  return { ...rest, hasApiKey: Boolean(encryptedApiKey) };
-}
-
 class CustomProviderRepository implements ICustomProviderRepository {
-  private localFile: string;
-
-  constructor() {
-    const dataDir = path.join(process.cwd(), 'src/shared/data');
-    if (!fs.existsSync(dataDir)) {
-      fs.mkdirSync(dataDir, { recursive: true });
-    }
-    this.localFile = path.join(dataDir, 'custom-providers.json');
-  }
-
-  private readAll(): StoredProvider[] {
-    if (!fs.existsSync(this.localFile)) return [];
-    try {
-      return JSON.parse(fs.readFileSync(this.localFile, 'utf8'));
-    } catch {
-      return [];
-    }
-  }
-
-  private writeAll(records: StoredProvider[]): void {
-    fs.writeFileSync(this.localFile, JSON.stringify(records, null, 2), 'utf8');
-  }
-
   public async list(): Promise<CustomProviderRecord[]> {
-    return this.readAll().map(toRecord);
+    const { data, error } = await supabase
+      .from('providers')
+      .select('*')
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      throw new ApplicationError('DATABASE_ERROR', `Failed to list providers: ${error.message}`);
+    }
+
+    return (data || []).map(this.mapToRecord);
   }
 
   public async findById(id: string): Promise<CustomProviderRecord | null> {
-    const found = this.readAll().find((p) => p.id === id);
-    return found ? toRecord(found) : null;
+    const { data, error } = await supabase
+      .from('providers')
+      .select('*')
+      .eq('id', id)
+      .single();
+
+    if (error) {
+      if (error.code === 'PGRST116') return null;
+      throw new ApplicationError('DATABASE_ERROR', `Failed to find provider: ${error.message}`);
+    }
+
+    return this.mapToRecord(data);
   }
 
   public async getDecryptedApiKey(id: string): Promise<string | null> {
-    const p = this.readAll().find((r) => r.id === id);
-    if (!p || !p.encryptedApiKey || !p.apiKeyIv || !p.apiKeyTag) return null;
+    const { data, error } = await supabase
+      .from('providers')
+      .select('encrypted_api_key, api_key_iv, api_key_tag')
+      .eq('id', id)
+      .single();
+
+    if (error || !data.encrypted_api_key) return null;
+
     try {
-      return decryptKey(p.encryptedApiKey, p.apiKeyIv, p.apiKeyTag);
+      return decryptKey(data.encrypted_api_key, data.api_key_iv, data.api_key_tag);
     } catch {
       throw new ApplicationError('DECRYPTION_ERROR', 'Failed to decrypt provider API key.');
     }
   }
 
   public async create(input: CustomProviderInput): Promise<CustomProviderRecord> {
-    const records = this.readAll();
-    const baseSlug = slugify(input.name);
-    let slug = baseSlug;
-    let suffix = 1;
-    while (records.some((r) => r.slug === slug)) {
-      slug = `${baseSlug}-${suffix++}`;
-    }
-
+    const slug = slugify(input.name);
+    
     let encryptedApiKey: string | undefined;
     let apiKeyIv: string | undefined;
     let apiKeyTag: string | undefined;
+    
     if (input.apiKey) {
       const enc = encryptKey(input.apiKey);
       encryptedApiKey = enc.encryptedValue;
@@ -117,13 +79,13 @@ class CustomProviderRepository implements ICustomProviderRepository {
     }
 
     const now = new Date().toISOString();
-    const record: StoredProvider = {
+    const newRecord = {
       id: crypto.randomUUID(),
       slug,
       name: input.name,
-      providerType: input.providerType,
-      baseUrl: input.baseUrl.replace(/\/+$/, ''),
-      defaultModel: input.defaultModel,
+      provider_type: input.providerType,
+      base_url: input.baseUrl.replace(/\/+$/, ''),
+      default_model: input.defaultModel,
       headers: input.headers ?? {},
       capabilities: {
         supportsStreaming: input.capabilities?.supportsStreaming ?? true,
@@ -131,67 +93,84 @@ class CustomProviderRepository implements ICustomProviderRepository {
         supportsTools: input.capabilities?.supportsTools ?? true,
         supportsReasoning: input.capabilities?.supportsReasoning ?? false,
       },
-      authHeader: input.authHeader ?? 'Authorization',
-      authPrefix: input.authPrefix ?? 'Bearer ',
-      timeoutMs: input.timeoutMs ?? 60000,
-      maxRetries: input.maxRetries ?? 2,
-      encryptedApiKey,
-      apiKeyIv,
-      apiKeyTag,
+      auth_header: input.authHeader ?? 'Authorization',
+      auth_prefix: input.authPrefix ?? 'Bearer ',
+      timeout_ms: input.timeoutMs ?? 60000,
+      max_retries: input.maxRetries ?? 2,
+      encrypted_api_key: encryptedApiKey,
+      api_key_iv: apiKeyIv,
+      api_key_tag: apiKeyTag,
       status: 'enabled',
-      connectionStatus: 'unknown',
-      createdAt: now,
-      updatedAt: now,
+      connection_status: 'unknown',
+      created_at: now,
+      updated_at: now,
     };
 
-    records.push(record);
-    this.writeAll(records);
-    return toRecord(record);
+    const { data, error } = await supabase
+      .from('providers')
+      .insert(newRecord)
+      .select()
+      .single();
+
+    if (error) {
+      throw new ApplicationError('DATABASE_ERROR', `Failed to create provider: ${error.message}`);
+    }
+
+    return this.mapToRecord(data);
   }
 
   public async update(id: string, input: Partial<CustomProviderInput>): Promise<CustomProviderRecord> {
-    const records = this.readAll();
-    const index = records.findIndex((r) => r.id === id);
-    if (index === -1) throw new ApplicationError('NOT_FOUND', 'Provider not found.');
-
-    const existing = records[index];
-    if (input.apiKey) {
-      const enc = encryptKey(input.apiKey);
-      existing.encryptedApiKey = enc.encryptedValue;
-      existing.apiKeyIv = enc.iv;
-      existing.apiKeyTag = enc.tag;
-    }
-
-    records[index] = {
-      ...existing,
-      name: input.name ?? existing.name,
-      providerType: input.providerType ?? existing.providerType,
-      baseUrl: input.baseUrl ? input.baseUrl.replace(/\/+$/, '') : existing.baseUrl,
-      defaultModel: input.defaultModel ?? existing.defaultModel,
-      headers: input.headers ?? existing.headers,
-      capabilities: { ...existing.capabilities, ...input.capabilities },
-      authHeader: input.authHeader ?? existing.authHeader,
-      authPrefix: input.authPrefix ?? existing.authPrefix,
-      timeoutMs: input.timeoutMs ?? existing.timeoutMs,
-      maxRetries: input.maxRetries ?? existing.maxRetries,
-      updatedAt: new Date().toISOString(),
+    const updateData: any = {
+      updated_at: new Date().toISOString()
     };
 
-    this.writeAll(records);
-    return toRecord(records[index]);
+    if (input.name) updateData.name = input.name;
+    if (input.providerType) updateData.provider_type = input.providerType;
+    if (input.baseUrl) updateData.base_url = input.baseUrl.replace(/\/+$/, '');
+    if (input.defaultModel) updateData.default_model = input.defaultModel;
+    if (input.headers) updateData.headers = input.headers;
+    if (input.capabilities) updateData.capabilities = input.capabilities;
+    if (input.authHeader) updateData.auth_header = input.authHeader;
+    if (input.authPrefix) updateData.auth_prefix = input.authPrefix;
+    if (input.timeoutMs) updateData.timeout_ms = input.timeoutMs;
+    if (input.maxRetries) updateData.max_retries = input.maxRetries;
+
+    if (input.apiKey) {
+      const enc = encryptKey(input.apiKey);
+      updateData.encrypted_api_key = enc.encryptedValue;
+      updateData.api_key_iv = enc.iv;
+      updateData.api_key_tag = enc.tag;
+    }
+
+    const { data, error } = await supabase
+      .from('providers')
+      .update(updateData)
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (error) {
+      throw new ApplicationError('DATABASE_ERROR', `Failed to update provider: ${error.message}`);
+    }
+
+    return this.mapToRecord(data);
   }
 
   public async delete(id: string): Promise<void> {
-    this.writeAll(this.readAll().filter((r) => r.id !== id));
+    const { error } = await supabase.from('providers').delete().eq('id', id);
+    if (error) {
+      throw new ApplicationError('DATABASE_ERROR', `Failed to delete provider: ${error.message}`);
+    }
   }
 
   public async setEnabled(id: string, enabled: boolean): Promise<void> {
-    const records = this.readAll();
-    const index = records.findIndex((r) => r.id === id);
-    if (index !== -1) {
-      records[index].status = enabled ? 'enabled' : 'disabled';
-      records[index].updatedAt = new Date().toISOString();
-      this.writeAll(records);
+    const { error } = await supabase
+      .from('providers')
+      .update({ status: enabled ? 'enabled' : 'disabled', updated_at: new Date().toISOString() })
+      .eq('id', id);
+
+    if (error) {
+      throw new ApplicationError('DATABASE_ERROR', `Failed to update status: ${error.message}`);
     }
   }
 
@@ -199,14 +178,43 @@ class CustomProviderRepository implements ICustomProviderRepository {
     id: string,
     result: { status: 'healthy' | 'degraded' | 'down'; latencyMs?: number }
   ): Promise<void> {
-    const records = this.readAll();
-    const index = records.findIndex((r) => r.id === id);
-    if (index !== -1) {
-      records[index].connectionStatus = result.status;
-      records[index].lastLatencyMs = result.latencyMs;
-      records[index].lastTestedAt = new Date().toISOString();
-      this.writeAll(records);
+    const { error } = await supabase
+      .from('providers')
+      .update({
+        connection_status: result.status,
+        last_latency_ms: result.latencyMs,
+        last_tested_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', id);
+
+    if (error) {
+      throw new ApplicationError('DATABASE_ERROR', `Failed to record health check: ${error.message}`);
     }
+  }
+
+  private mapToRecord(data: any): CustomProviderRecord {
+    return {
+      id: data.id,
+      slug: data.slug,
+      name: data.name,
+      providerType: data.provider_type,
+      baseUrl: data.base_url,
+      defaultModel: data.default_model,
+      headers: data.headers,
+      capabilities: data.capabilities,
+      authHeader: data.auth_header,
+      authPrefix: data.auth_prefix,
+      timeoutMs: data.timeout_ms,
+      maxRetries: data.max_retries,
+      status: data.status,
+      connectionStatus: data.connection_status,
+      lastTestedAt: data.last_tested_at,
+      lastLatencyMs: data.last_latency_ms,
+      createdAt: data.created_at,
+      updatedAt: data.updated_at,
+      hasApiKey: Boolean(data.encrypted_api_key),
+    };
   }
 }
 
