@@ -1,0 +1,69 @@
+{
+  "extends": [
+    "next/core-web-vitals",
+    "eslint:recommended"
+  ],
+  "rules": {
+    "no-console": ["warn", { "allow": ["warn", "error"] }],
+    "no-unused-vars": "off",
+    "eqeqeq": ["error", "always"],
+    "no-var": "error",
+    "prefer-const": "error",
+    "no-undef": "off",
+    
+    /* Strict Hybrid Modular Clean Architecture Import Boundaries */
+    "no-restricted-imports": [
+      "error",
+      {
+        "patterns": [
+          {
+            "group": ["@modules/*/infrastructure", "@modules/*/infrastructure/**/*"],
+            "message": "Do not import concrete infrastructure details directly. Import abstractions via Application ports instead."
+          },
+          {
+            "group": ["@modules/*/presentation", "@modules/*/presentation/**/*"],
+            "message": "Do not import presentation layers from other modules. Coordinate via Event Bus or Shared APIs."
+          },
+          {
+            "group": ["@core/security/vault/private", "@core/security/vault/private/**/*"],
+            "message": "Direct access to security private keys decryption mechanisms is restricted. Utilize the public Vault Service."
+          }
+        ]
+      }
+    ]
+  },
+  "overrides": [
+    {
+      "files": ["src/modules/*/domain/**/*", "src/modules/*/application/**/*"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": ["@modules/*/infrastructure", "@modules/*/infrastructure/**/*", "**/infrastructure/*"],
+                "message": "Domain and Application layers must remain independent of concrete infrastructure."
+              },
+              {
+                "group": ["@modules/*/presentation", "@modules/*/presentation/**/*", "**/presentation/*"],
+                "message": "Domain and Application layers must remain independent of UI presentation."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": [
+        "src/modules/*/infrastructure/**/*",
+        "src/modules/*/presentation/**/*",
+        "src/core/database/repositories/**/*",
+        "src/app/**/*"
+      ],
+      "rules": {
+        /* Allow infrastructure, presentation, and Next.js app entrypoints to import relative files */
+        "no-restricted-imports": "off"
+      }
+    }
+  ]
+}

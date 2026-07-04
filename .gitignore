@@ -1,0 +1,61 @@
+# Dependency Directories
+node_modules/
+/jspm_packages/
+.pnp
+.pnp.js
+
+# Build and Production Outputs
+.next/
+out/
+build/
+dist/
+.docusaurus/
+
+# Environment Variables and Secrets
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+*.env.local
+.env*.local
+*.key
+*.pem
+secrets/
+
+# Debug and Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+.pnpm-debug.log*
+
+# Testing & Coverage
+coverage/
+.nyc_output/
+.cypress/
+/screenshots
+/videos
+
+# System and IDE Files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Vercel Deployment Metadata
+.vercel
+
+# Local fallback data store (encrypted API keys, uploaded files)
+# This must never be committed - see SECURITY note in api-key.repository.ts
+src/shared/data/*.json
+src/shared/data/uploads/
