@@ -9,6 +9,8 @@ import {
   CustomProviderType,
 } from '@shared/ports/repositories';
 
+const DEFAULT_WORKSPACE_ID = '550e8400-e29b-41d4-a716-446655440001';
+
 function slugify(name: string): string {
   return (
     name
@@ -81,6 +83,7 @@ class CustomProviderRepository implements ICustomProviderRepository {
     const now = new Date().toISOString();
     const newRecord = {
       id: crypto.randomUUID(),
+      workspace_id: DEFAULT_WORKSPACE_ID,
       slug,
       name: input.name,
       provider_type: input.providerType,
@@ -93,8 +96,8 @@ class CustomProviderRepository implements ICustomProviderRepository {
         supportsTools: input.capabilities?.supportsTools ?? true,
         supportsReasoning: input.capabilities?.supportsReasoning ?? false,
       },
-      auth_header: input.authHeader ?? 'Authorization',
-      auth_prefix: input.authPrefix ?? 'Bearer ',
+      auth_header: input.auth_header ?? 'Authorization',
+      auth_prefix: input.auth_prefix ?? 'Bearer ',
       timeout_ms: input.timeoutMs ?? 60000,
       max_retries: input.maxRetries ?? 2,
       encrypted_api_key: encryptedApiKey,
@@ -158,9 +161,7 @@ class CustomProviderRepository implements ICustomProviderRepository {
 
   public async delete(id: string): Promise<void> {
     const { error } = await supabase.from('providers').delete().eq('id', id);
-    if (error) {
-      throw new ApplicationError('DATABASE_ERROR', `Failed to delete provider: ${error.message}`);
-    }
+    if (error) throw new ApplicationError('DATABASE_ERROR', `Failed to delete provider: ${error.message}`);
   }
 
   public async setEnabled(id: string, enabled: boolean): Promise<void> {
@@ -169,9 +170,7 @@ class CustomProviderRepository implements ICustomProviderRepository {
       .update({ status: enabled ? 'enabled' : 'disabled', updated_at: new Date().toISOString() })
       .eq('id', id);
 
-    if (error) {
-      throw new ApplicationError('DATABASE_ERROR', `Failed to update status: ${error.message}`);
-    }
+    if (error) throw new ApplicationError('DATABASE_ERROR', `Failed to update status: ${error.message}`);
   }
 
   public async recordHealthCheck(
@@ -188,9 +187,7 @@ class CustomProviderRepository implements ICustomProviderRepository {
       })
       .eq('id', id);
 
-    if (error) {
-      throw new ApplicationError('DATABASE_ERROR', `Failed to record health check: ${error.message}`);
-    }
+    if (error) throw new ApplicationError('DATABASE_ERROR', `Failed to record health check: ${error.message}`);
   }
 
   private mapToRecord(data: any): CustomProviderRecord {

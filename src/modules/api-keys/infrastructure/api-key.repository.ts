@@ -16,15 +16,15 @@ export interface ApiKeyRecord {
   createdAt: string;
 }
 
+const DEFAULT_WORKSPACE_ID = '550e8400-e29b-41d4-a716-446655440001';
+
 class ApiKeyRepository implements IApiKeyRepository {
-  /**
-   * Adds a new API key securely encrypted to Supabase.
-   */
   public async addKey(providerId: string, name: string, plainValue: string): Promise<ApiKeyRecord> {
     const encrypted = encryptKey(plainValue);
     
     const newRecord = {
       id: crypto.randomUUID(),
+      workspace_id: DEFAULT_WORKSPACE_ID,
       provider_id: providerId,
       name,
       encrypted_value: encrypted.encryptedValue,
@@ -48,9 +48,6 @@ class ApiKeyRepository implements IApiKeyRepository {
     return this.mapToRecord(data);
   }
 
-  /**
-   * Retrieves and decrypts the key for a provider from Supabase.
-   */
   public async getDecryptedKey(providerId: string): Promise<string | null> {
     const { data, error } = await supabase
       .from('api_keys_vault')
@@ -62,21 +59,17 @@ class ApiKeyRepository implements IApiKeyRepository {
       .single();
 
     if (error) {
-      if (error.code === 'PGRST116') return null; // Not found
+      if (error.code === 'PGRST116') return null;
       throw new ApplicationError('DATABASE_ERROR', `Failed to fetch API key: ${error.message}`);
     }
     
     try {
       return decryptKey(data.encrypted_value, data.iv, data.tag);
     } catch (e) {
-      console.error('Decryption error:', e);
       throw new ApplicationError('DECRYPTION_ERROR', 'Failed to decrypt API key credentials.');
     }
   }
 
-  /**
-   * Lists all stored keys from Supabase with secrets removed.
-   */
   public async listKeys(): Promise<Array<Omit<ApiKeyRecord, 'encryptedValue' | 'iv' | 'tag'>>> {
     const { data, error } = await supabase
       .from('api_keys_vault')
@@ -97,42 +90,16 @@ class ApiKeyRepository implements IApiKeyRepository {
     }));
   }
 
-  /**
-   * Deletes a key record by ID from Supabase.
-   */
   public async deleteKey(id: string): Promise<void> {
-    const { error } = await supabase
-      .from('api_keys_vault')
-      .delete()
-      .eq('id', id);
-
-    if (error) {
-      throw new ApplicationError('DATABASE_ERROR', `Failed to delete API key: ${error.message}`);
-    }
+    const { error } = await supabase.from('api_keys_vault').delete().eq('id', id);
+    if (error) throw new ApplicationError('DATABASE_ERROR', `Failed to delete API key: ${error.message}`);
   }
 
-  /**
-   * Toggles status (enabled/disabled) in Supabase.
-   */
   public async toggleKeyStatus(id: string): Promise<void> {
-    const { data: current } = await supabase
-      .from('api_keys_vault')
-      .select('status')
-      .eq('id', id)
-      .single();
-
+    const { data: current } = await supabase.from('api_keys_vault').select('status').eq('id', id).single();
     if (!current) return;
-
-    const newStatus = current.status === 'enabled' ? 'disabled' : 'enabled';
-
-    const { error } = await supabase
-      .from('api_keys_vault')
-      .update({ status: newStatus })
-      .eq('id', id);
-
-    if (error) {
-      throw new ApplicationError('DATABASE_ERROR', `Failed to update API key status: ${error.message}`);
-    }
+    const { error } = await supabase.from('api_keys_vault').update({ status: current.status === 'enabled' ? 'disabled' : 'enabled' }).eq('id', id);
+    if (error) throw new ApplicationError('DATABASE_ERROR', `Failed to update status: ${error.message}`);
   }
 
   private mapToRecord(data: any): ApiKeyRecord {
@@ -151,4 +118,3 @@ class ApiKeyRepository implements IApiKeyRepository {
 }
 
 export const ApiKeyRepo = new ApiKeyRepository();
-export type { ApiKeyRepository };
